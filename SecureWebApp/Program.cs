@@ -1,15 +1,15 @@
 using Azure.Identity;
-using Azure.Security.KeyVault.Secrets;
 
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services
 builder.Services.AddRazorPages();
 
-// Configure Key Vault (only in Azure)
+// Load Azure Key Vault configuration (only in non-development environments)
 if (!builder.Environment.IsDevelopment())
 {
     var keyVaultUrl = builder.Configuration["KeyVaultUrl"];
+
     if (!string.IsNullOrEmpty(keyVaultUrl))
     {
         builder.Configuration.AddAzureKeyVault(
@@ -20,7 +20,7 @@ if (!builder.Environment.IsDevelopment())
 
 var app = builder.Build();
 
-// Configure pipeline
+// Configure the HTTP request pipeline
 if (!app.Environment.IsDevelopment())
 {
     app.UseExceptionHandler("/Error");
@@ -29,11 +29,16 @@ if (!app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 app.UseStaticFiles();
+
 app.UseRouting();
 app.UseAuthorization();
+
 app.MapRazorPages();
 
 // Health check endpoint
-app.MapGet("/health", () => Results.Ok(new { Status = "Healthy", Timestamp = DateTime.UtcNow }));
+app.MapGet("/health", () => Results.Ok(new { 
+    Status = "Healthy", 
+    Timestamp = DateTime.UtcNow 
+}));
 
 app.Run();

@@ -1,0 +1,60 @@
+name: Cleanup Resources
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_destroy:
+        description: 'Type "destroy" to confirm resource deletion'
+        required: true
+        default: ''
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.confirm_destroy == 'destroy'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Optional: Add a case-insensitive confirmation step
+      - name: Check confirmation
+        run: |
+          CONFIRM="${{ github.event.inputs.confirm_destroy }}"
+          if [[ "${CONFIRM,,}" != "destroy" ]]; then
+            echo "Confirmation input does not match 'destroy'. Aborting."
+            exit 1
+          fi
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.4.6'  # Optional specific version pinning
+
+      - name: Terraform Init
+        run: |
+          cd infra
+          terraform init
+
+      # Optional: Validate Terraform configuration before destroy
+      - name: Terraform Validate
+        run: |
+          cd infra
+          terraform validate
+
+      - name: Terraform Destroy
+        run: |
+          cd infra
+          terraform destroy -auto-approve \
+            -var="resource_group_name=${{ secrets.RESOURCE_GROUP_NAME }}" \
+            -var="app_name=${{ secrets.APP_NAME }}" \
+            -var="key_vault_name=${{ secrets.KEY_VAULT_NAME }}" \
+            -var="location=${{ secrets.LOCATION }}"
+
+      # Optional: Final confirmation message
+      - name: Confirm Destruction Complete
+        run: echo "✅ Terraform destroy completed. Resources have been deleted."

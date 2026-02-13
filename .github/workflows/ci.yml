@@ -1,0 +1,243 @@
+name: Secure CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  id-token: write
+  issues: write
+  pull-requests: read
+
+env:
+  DOTNET_VERSION: '8.0.x'
+  WORKING_DIRECTORY: './SecureWebApp'
+
+jobs:
+  security-analysis:
+    name: Security Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: csharp
+          queries: security-extended
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore dependencies
+        run: dotnet restore ${{ env.WORKING_DIRECTORY }}
+
+      - name: Build application
+        run: dotnet build ${{ env.WORKING_DIRECTORY }} --configuration Release --no-restore
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+
+  build-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    needs: [security-analysis]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore dependencies
+        run: dotnet restore ${{ env.WORKING_DIRECTORY }}
+
+      - name: Build application
+        run: dotnet build ${{ env.WORKING_DIRECTORY }} --configuration Release --no-restore
+
+      - name: Run tests
+        run: dotnet test ${{ env.WORKING_DIRECTORY }} --configuration Release --no-build --verbosity normal
+
+      - name: Publish application
+        run: dotnet publish ${{ env.WORKING_DIRECTORY }} --configuration Release --no-build --output ./publish
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: webapp-build
+          path: ./publish
+          retention-days: 1
+
+  infrastructure:
+    name: Deploy Infrastructure
+    runs-on: ubuntu-latest
+    needs: [build-test]
+    if: github.ref == 'refs/heads/main'
+    outputs:
+      app-service-url: ${{ steps.terraform-output.outputs.app-service-url }}
+      app-name: ${{ steps.terraform-output.outputs.app-name }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ~1.0
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        run: |
+          cd infra
+          terraform init
+
+      - name: Terraform Validate
+        run: |
+          cd infra
+          terraform validate
+
+      - name: Terraform Plan
+        run: |
+          cd infra
+          terraform plan \
+            -var="resource_group_name=${{ secrets.RESOURCE_GROUP_NAME }}" \
+            -var="app_name=${{ secrets.APP_NAME }}" \
+            -var="key_vault_name=${{ secrets.KEY_VAULT_NAME }}" \
+            -var="location=${{ secrets.LOCATION }}" \
+            -out=tfplan
+
+      - name: Terraform Apply
+        run: |
+          cd infra
+          terraform apply -auto-approve tfplan
+
+      - name: Get Terraform Outputs
+        id: terraform-output
+        run: |
+          cd infra
+          echo "app-service-url=$(terraform output -raw app_service_url)" >> $GITHUB_OUTPUT
+          echo "app-name=$(terraform output -raw app_service_name)" >> $GITHUB_OUTPUT
+
+  deploy-application:
+    name: Deploy to Web App
+    runs-on: ubuntu-latest
+    needs: [infrastructure]
+    environment: production  # Deploy directly to production in free tier
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: webapp-build
+          path: ./publish
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Deploy to Azure Web App
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ needs.infrastructure.outputs.app-name }}
+          package: ./publish  # No slots used in free tier, deploy directly to main app
+
+      - name: Wait for deployment
+        run: sleep 30
+
+      - name: Health check
+        run: |
+          MAX_ATTEMPTS=10
+          ATTEMPT=1
+          URL="${{ needs.infrastructure.outputs.app-service-url }}/health"
+          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+            echo "Health check attempt $ATTEMPT of $MAX_ATTEMPTS"
+            if curl -f -s "$URL"; then
+              echo "✅ Health check passed"
+              exit 0
+            fi
+            echo "❌ Health check failed, waiting..."
+            sleep 15
+            ATTEMPT=$((ATTEMPT + 1))
+          done
+          echo "❌ Health check failed after $MAX_ATTEMPTS attempts"
+          exit 1
+
+  security-scan:
+    name: DAST Security Scan
+    runs-on: ubuntu-latest
+    needs: [deploy-application]
+    steps:
+      - name: OWASP ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.10.0
+        with:
+          target: ${{ needs.infrastructure.outputs.app-service-url }}
+          rules_file_name: '.zap/rules.tsv'
+          cmd_options: '-a'
+        continue-on-error: true
+
+      - name: Create ZAP rules file
+        run: |
+          mkdir -p .zap
+          echo -e "10021\tIGNORE\tX-Content-Type-Options" > .zap/rules.tsv
+
+  production-approval:
+    name: Production Deployment Approval
+    runs-on: ubuntu-latest
+    needs: [security-scan]
+    environment: production
+    steps:
+      - name: Manual approval checkpoint
+        uses: trstringer/manual-approval@v1
+        with:
+          secret: ${{ github.token }}
+          approvers: ${{ secrets.DEPLOY_APPROVERS }}  # Updated secret name here
+          minimum-approvals: 1
+          issue-title: "Production Ready - Approval Required - ${{ github.sha }}"
+          issue-body: |
+            **Deployment Details:**
+            - Commit: ${{ github.sha }}
+            - Branch: ${{ github.ref_name }}
+            - App URL: ${{ needs.security-scan.outputs.app-service-url }}
+            
+            **Security Scans:** ✅ Completed
+            **Health Checks:** ✅ Passed
+            
+            Please review the application in the production environment before approving.
+
+  finalize-production:
+    name: Finalize Production Deployment
+    runs-on: ubuntu-latest
+    needs: [production-approval]
+    environment: production
+    steps:
+      - name: Production Deployment Verified
+        run: |
+          echo "✅ Production deployment finalized and approved."
