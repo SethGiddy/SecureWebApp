@@ -1,0 +1,10 @@
+resource_group_name = "rg-secureapp1234"   # Example resource group name
+location           = "eastus"              # Choose a region supported by the free tier (e.g., "eastus", "centralus")
+app_name           = "secureapp1234"       # Example app service name (must be unique across Azure)
+key_vault_name     = "kv-secureapp1234"    # Example Key Vault name (must be globally unique)
+
+tags = {
+  Environment = "Development"              # Adjust Environment tag as needed
+  Project     = "SecureWebApp"
+  Owner       = "DevOps Team"
+}

@@ -1,0 +1,12 @@
+﻿@page
+@model IndexModel
+@{
+    ViewData["Title"] = "Secure Web App";
+}
+
+<div class="text-center">
+    <h1 class="display-4">Welcome to Secure Web App</h1>
+    <p>Environment: <strong>@Model.Environment</strong></p>
+    <p>Secret Status: <strong>@Model.SecretStatus</strong></p>
+    <p><a href="/health">Health Check</a></p>
+</div>
